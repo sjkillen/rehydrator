@@ -1,8 +1,24 @@
 import base64
 from functools import reduce
 import bpy
-from bpy.types import Collection, Object, Mesh, Curve, SurfaceCurve, MetaBall, Text, Volume, GreasePencil, Armature, Image, Light, LightProbe, Camera, Speaker
-from typing import TypeVar, Generic, NewType, get_type_hints
+from bpy.types import (
+    Collection,
+    Object,
+    Mesh,
+    Curve,
+    SurfaceCurve,
+    MetaBall,
+    Text,
+    Volume,
+    GreasePencil,
+    Armature,
+    Image,
+    Light,
+    LightProbe,
+    Camera,
+    Speaker,
+)
+from typing import Literal, TypeVar, Generic, NewType, Union, get_type_hints
 from functools import lru_cache
 from contextlib import contextmanager
 import pickle
@@ -13,6 +29,10 @@ T = TypeVar("T")
 
 class ObjectData(Generic[T], Object):
     data: T
+
+
+def Append(o: T, path: str) -> T:
+    return path
 
 
 EmptyObject = ObjectData[None]
@@ -32,27 +52,28 @@ SpeakerObject = ObjectData[Speaker]
 # data is None, but not sure how to construct new forces.
 ForceObject = NewType("ForceObject", ObjectData[None])
 
-all_blend_types = {Collection,
-                   EmptyObject,
-                   MeshObject,
-                   CurveObject,
-                   SurfaceObject,
-                   MetaBallObject,
-                   TextObject,
-                   VolumeObject,
-                   GreasePencilObject,
-                   ArmatureObject,
-                   ImageObject,
-                   LightObject,
-                   LightProbeObject,
-                   CameraObject,
-                   SpeakerObject}
+
+all_blend_types = {
+    Collection,
+    EmptyObject,
+    MeshObject,
+    CurveObject,
+    SurfaceObject,
+    MetaBallObject,
+    TextObject,
+    VolumeObject,
+    GreasePencilObject,
+    ArmatureObject,
+    ImageObject,
+    LightObject,
+    LightProbeObject,
+    CameraObject,
+    SpeakerObject,
+}
 
 
 class Rehydratable:
-    def __init__(
-        self, container: Collection = None, rehydrating=False
-    ):
+    def __init__(self, container: Collection = None, rehydrating=False):
         self.__prefix = Rehydratable.dehydrate_classname(type(self))
         if rehydrating:
             self.__c = container
@@ -68,7 +89,9 @@ class Rehydratable:
         if field.startswith(f"_{Rehydratable.__name__}"):
             return
         hints = get_type_hints(type(self))
-        if hints.get(field, None) not in all_blend_types and not isinstance(v, Rehydratable):
+        if hints.get(field, None) not in all_blend_types and not isinstance(
+            v, Rehydratable
+        ):
             with storage_ctx(self.__data) as storage:
                 storage[field] = v
 
@@ -78,32 +101,50 @@ class Rehydratable:
         self.__data["__prefix"] = self.__prefix
         init_storage(self.__data)
 
-        fields = {field: cls for field, cls in type(
-            self).get_all_type_hints().items()}
+        fields = {
+            field: cls
+            for field, cls in type(self).get_all_type_hints().items()
+            if not field.endswith("_append_from")
+        }
 
         for field, cls in fields.items():
             self.initialize_bpy_field(field, cls, self.__data)
 
     def initialize_bpy_field(self, field: str, Cls, data: EmptyObject):
         name = f"{self.__prefix}.{field}"
-        if Cls == Collection or (Cls not in all_blend_types and issubclass(Cls, Rehydratable)):
-            obj = bpy.data.collections.new(name)
+        append_path = f"{field}_append_from"
+        if Cls == Collection or (
+            Cls not in all_blend_types and issubclass(Cls, Rehydratable)
+        ):
+            if hasattr(self, append_path):
+                blend_file, obj_name = getattr(self, append_path).split("@")
+                with bpy.data.libraries.load(blend_file) as (src, dest):
+                    dest.collections = [obj_name]
+                obj = dest.collections[0]
+            else:
+                obj = bpy.data.collections.new(name)
             self.__c.children.link(obj)
             obj["__field"] = field
             if issubclass(Cls, Rehydratable):
                 obj = Cls(obj)
         elif Cls in all_blend_types:
-            if Cls == EmptyObject:
-                data = None
-            elif Cls == MeshObject:
-                data = bpy.data.meshes.new(f"{name}.mesh")
-            elif Cls == CameraObject:
-                data = bpy.data.cameras.new(f"{name}.camera")
-            elif Cls == CurveObject:
-                data = bpy.data.curves.new(f"{name}.curve", type="CURVE")
+            if hasattr(self, append_path):
+                blend_file, obj_name = getattr(self, append_path).split("@")
+                with bpy.data.libraries.load(blend_file) as (src, dest):
+                    dest.objects = [obj_name]
+                obj = dest.objects[0]
             else:
-                raise Exception("Type", Cls, "not supported")
-            obj = bpy.data.objects.new(name, data)
+                if Cls == EmptyObject:
+                    data = None
+                elif Cls == MeshObject:
+                    data = bpy.data.meshes.new(f"{name}.mesh")
+                elif Cls == CameraObject:
+                    data = bpy.data.cameras.new(f"{name}.camera")
+                elif Cls == CurveObject:
+                    data = bpy.data.curves.new(f"{name}.curve", type="CURVE")
+                else:
+                    raise Exception("Type", Cls, "not supported")
+                obj = bpy.data.objects.new(name, data)
             self.__c.objects.link(obj)
             obj["__field"] = field
         else:
@@ -121,8 +162,7 @@ class Rehydratable:
             protoname = f"{prefix}{subtype.__name__}"
             if protoname == name:
                 return subtype
-            work_list.extend((f"{protoname}.", a)
-                             for a in subtype.__subclasses__())
+            work_list.extend((f"{protoname}.", a) for a in subtype.__subclasses__())
         else:
             raise Exception("Not found")
 
@@ -176,10 +216,13 @@ class Rehydratable:
     @classmethod
     def get_all_type_hints(cls):
         rehydratable_bases = tuple(
-            get_type_hints(base) for base in cls.__bases__ if issubclass(base, Rehydratable))[::-1]
-        return reduce(lambda a, b: {**a, **b},
-                      (*rehydratable_bases, get_type_hints(cls)),
-                      dict())
+            get_type_hints(base)
+            for base in cls.__bases__
+            if issubclass(base, Rehydratable)
+        )[::-1]
+        return reduce(
+            lambda a, b: {**a, **b}, (*rehydratable_bases, get_type_hints(cls)), dict()
+        )
 
     @staticmethod
     def get_part(c: Collection, part: str):
@@ -187,7 +230,7 @@ class Rehydratable:
 
     @staticmethod
     def try_get_prefix(c: Collection) -> str:
-        if (data := next((obj for obj in c.objects if ".__data" in obj.name), None)):
+        if data := next((obj for obj in c.objects if ".__data" in obj.name), None):
             return data["__prefix"]
 
 
@@ -200,6 +243,7 @@ def example_class_names():
 
     class Baz(Bar, Foo):
         pass
+
     name = Rehydratable.dehydrate_classname(Baz)
     assert name == "Foo.Bar.Baz"
     assert Rehydratable.rehydrate_classname(name) == Baz
@@ -220,9 +264,16 @@ def example_get_all_type_hints():
     class Chair(Bar, Baz):
         pass
 
-    assert Chair.get_all_type_hints(
-    ) == {"a": Collection, "b": SurfaceObject, "c": EmptyObject}
+    assert Chair.get_all_type_hints() == {
+        "a": Collection,
+        "b": SurfaceObject,
+        "c": EmptyObject,
+    }
 
+def example_imports():
+    class Foo(Rehydratable):
+        a: MeshObject
+        a_append_from = "/home/capybara/Downloads/untitled.blend@Cube"
 
 class RehydrateSceneOperator(bpy.types.Operator):
     bl_idname = "object.rehydrate_scene"
@@ -237,7 +288,7 @@ class RehydrateSceneOperator(bpy.types.Operator):
                 else:
                     wl.append(col)
 
-        return {'FINISHED'}
+        return {"FINISHED"}
 
 
 def example():
@@ -256,14 +307,9 @@ def example():
                 self.counter = 0
 
 
-ops = (
-    RehydrateSceneOperator,
-)
+ops = (RehydrateSceneOperator,)
 
-menus = tuple(
-    lambda menu, context: menu.layout.operator(
-        Op.bl_idname) for Op in ops
-)
+menus = tuple(lambda menu, context: menu.layout.operator(Op.bl_idname) for Op in ops)
 
 
 def register():
@@ -282,8 +328,7 @@ def storage_ctx(data: EmptyObject):
     try:
         yield storage
     finally:
-        data["__data"] = base64.encodebytes(
-            pickle.dumps(storage)).decode("ASCII")
+        data["__data"] = base64.encodebytes(pickle.dumps(storage)).decode("ASCII")
 
 
 def init_storage(data: EmptyObject):
