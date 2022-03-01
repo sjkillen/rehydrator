@@ -17,8 +17,9 @@ from bpy.types import (
     LightProbe,
     Camera,
     Speaker,
+    Scene,
 )
-from typing import Literal, TypeVar, Generic, NewType, Union, get_type_hints
+from typing import TypeVar, Generic, NewType, get_type_hints
 from functools import lru_cache
 from contextlib import contextmanager
 import pickle
@@ -234,46 +235,9 @@ class Rehydratable:
             return data["__prefix"]
 
 
-def example_class_names():
-    class Foo(Rehydratable):
-        pass
-
-    class Bar(Foo):
-        pass
-
-    class Baz(Bar, Foo):
-        pass
-
-    name = Rehydratable.dehydrate_classname(Baz)
-    assert name == "Foo.Bar.Baz"
-    assert Rehydratable.rehydrate_classname(name) == Baz
 
 
-def example_get_all_type_hints():
-    class Foo(Rehydratable):
-        a: Collection
-        b: MeshObject
 
-    class Bar(Foo):
-        b: SurfaceObject
-        c: EmptyObject
-
-    class Baz(Rehydratable):
-        c: MeshObject
-
-    class Chair(Bar, Baz):
-        pass
-
-    assert Chair.get_all_type_hints() == {
-        "a": Collection,
-        "b": SurfaceObject,
-        "c": EmptyObject,
-    }
-
-def example_imports():
-    class Foo(Rehydratable):
-        a: MeshObject
-        a_append_from = "/home/capybara/Downloads/untitled.blend@Cube"
 
 class RehydrateSceneOperator(bpy.types.Operator):
     bl_idname = "object.rehydrate_scene"
@@ -291,20 +255,7 @@ class RehydrateSceneOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def example():
-    class B(Rehydratable):
-        obj: EmptyObject
 
-    class A(Rehydratable):
-        mesh: MeshObject
-        curve: CurveObject
-        counter: int
-        b: B
-
-        def __init__(self, container: Collection = None, rehydrating=False):
-            super().__init__(container, rehydrating)
-            if not rehydrating:
-                self.counter = 0
 
 
 ops = (RehydrateSceneOperator,)
@@ -335,4 +286,18 @@ def init_storage(data: EmptyObject):
     data["__data"] = base64.encodebytes(pickle.dumps(dict())).decode("ASCII")
 
 
+def rehydrate_scene(self: Scene):
+    wl = [self.collection]
+    results = []
+    while len(wl) > 0:
+        item = wl.pop()
+        if isinstance(item, Collection):
+            if Rehydratable.try_get_prefix(item):
+                results.append(Rehydratable.rehydrate(item))
+            else:
+                wl.extend(item.children)
+    return results
+
+
+bpy.types.Scene.rehydrate = rehydrate_scene
 bpy.types.Rehydratable = Rehydratable
